@@ -39,7 +39,7 @@ const RAW = [
  ['sayu','사유','anemo','claymore',4,'heal/sup','em',150,0,'EQ'],
  ['lynette','리넷','anemo','sword',4,'sup','atk',140,1,'E'],
  ['chasca','차스카','anemo','bow',5,'main','atk',110,1,'E'],
- ['heizou','시카노인 헤이조','anemo','catalyst',4,'main','atk',120,1,'EQ'],
+ ['heizou','시카노인 헤이조','anemo','catalyst',4,'main/sub','atk',120,1,'EQ'],
  ['raiden','라이덴 쇼군','electro','polearm',5,'main/sub','atk',250,1,'Q'],
  ['fischl','피슬','electro','bow',4,'sub','atk',120,1,'E'],
  ['beidou','북두','electro','claymore',4,'sub/shield','atk',170,1,'Q'],
@@ -62,7 +62,7 @@ const RAW = [
  ['yaoyao','요요','dendro','polearm',4,'heal','hp',150,0,'Q'],
  ['emilie','에밀리','dendro','polearm',5,'sub','atk',130,1,'EQ'],
  ['kinich','키니치','dendro','claymore',5,'main','atk',110,1,'E'],
- ['ganyu','감우','cryo','bow',5,'main','atk',110,1,'NQ'],
+ ['ganyu','감우','cryo','bow',5,'main/sub','atk',110,1,'NQ'],
  ['ayaka','카미사토 아야카','cryo','sword',5,'main','atk',130,1,'EQ'],
  ['shenhe','신학','cryo','polearm',5,'sup','atk',160,0,'EQ'],
  ['rosaria','로자리아','cryo','polearm',4,'sub','atk',140,1,'Q'],
@@ -247,6 +247,8 @@ for (const [id, name, el, wp, r, roles, scale, er, crit, tal, guess] of RAW)
 GP.ORDER = Object.keys(GP.EL);
 GP.KEY = 'genshin-party-appraiser-v1';
 // 메인 앱(파티 감정소)에 저장된 내 캐릭터 목록. 없거나 읽을 수 없으면 빈 객체
+// 파티 감정소(감정 마스터)가 저장해 둔 육성 점수·오버롤: { id: { s: 육성, o: OVR, p: 성능 } }
+GP.appraisal = () => { try { return JSON.parse(localStorage.getItem(GP.KEY + ':appraisal')) || {}; } catch (e) { return {}; } };
 GP.roster = () => { try { return (JSON.parse(localStorage.getItem(GP.KEY)) || {}).roster || {}; } catch (e) { return {}; } };
 GP.esc = s => String(s).replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
 // 캐릭터 아이콘 파일 이름(게임 내부 이름, enka.network 제공 · © HoYoverse). index.html의 ICON과 같은 표 — 신캐 추가 시 둘 다 고칠 것
@@ -285,7 +287,7 @@ GP.slotsAt = (id, cons = null) => {
     const g = roleArr(GG_ROLE[id]);
     if (!g) return markAlt(fallback());
     g.forEach((t, i) => t && out.push({ pos: GP.POS[i][0], tier: t, perf: GP.roleScore(id, t), est: false }));
-    return markAlt(out);
+    return markAlt(addRoles(d, out));
   }
   const a = roleArr(GG_ROLE_C0[id]) || roleArr(GG_ROLE[id]), b = roleArr(GG_ROLE_C6[id]) || a;
   if (!a) return markAlt(fallback());
@@ -293,12 +295,32 @@ GP.slotsAt = (id, cons = null) => {
   for (let i = 0; i < 3; i++) {
     const ta = a[i], tb = b[i];
     if (!(ta && w < 1) && !(tb && w >= 0.5)) continue;
-    const sa = ta ? GP.roleScore(id, ta) : null, sb = tb ? GP.roleScore(id, tb) : null;
+    const sa = ta ? GP.roleScore(id, ta) : null;
+    let sb = tb ? GP.roleScore(id, tb) : null;
+    // GamsGo 명함·풀돌 등급이 같으면 점수도 같아져 돌파 가치가 0으로 보이므로, 같은 등급 칸 안에서 풀돌 가치만큼 올림
+    // (5성 +6 · 4성 +4, 등급 칸 위쪽 끝까지, 적어도 +2). 풀돌 등급이 더 낮게 적힌 경우도 돌파로 성능이 줄지는 않으니 명함 점수 이상으로
+    if (sa != null && sb != null && sb <= sa) sb = Math.min(100, Math.max(sa + 2, Math.min((GG_BAND[GG_SCORE[ta]] || [0, 100])[1], sa + (d.r === 5 ? 6 : 4))));
     const perf = sa != null && sb != null ? Math.round(sa + (sb - sa) * w) : (sa ?? sb);
     out.push({ pos: GP.POS[i][0], tier: cons === 0 ? ta : cons === 6 ? tb : null, perf, est: cons > 0 && cons < 6 && ta !== tb });
   }
-  return markAlt(out.length ? out : fallback());
+  return markAlt(addRoles(d, out.length ? out : fallback()));
 };
+// 게임에서 맡는 역할인데 티어표(GamsGo)에 칸이 없으면(예: 미탸 서브 딜러, 헤이조 서브 딜러) 그 칸도 넣음.
+// 점수는 그 캐릭터의 가장 높은 칸보다 한 등급 아래로 추정(xrole = 역할 추정)
+const ROLE_POS = { main: 'main', sub: 'sub', sup: 'sup', heal: 'sup', shield: 'sup' };
+function addRoles(d, out) {
+  if (!out.length) return out;
+  const best = out.reduce((a, b) => b.perf > a.perf ? b : a);
+  for (const r of d.roles) {
+    const pos = ROLE_POS[r];
+    if (!pos || out.some(x => x.pos === pos)) continue;
+    const ti = best.tier ? TIER_ORDER.indexOf(best.tier) : -1, tier = ti > 0 ? TIER_ORDER[ti - 1] : ti === 0 ? 'D' : null;
+    const perf = Math.max(0, best.perf - 8);
+    out.push({ pos, tier, perf, est: true, xrole: true });
+  }
+  out.sort((a, b) => GP.POS.findIndex(p => p[0] === a.pos) - GP.POS.findIndex(p => p[0] === b.pos));
+  return out;
+}
 function markAlt(sl) {
   const top = Math.max(...sl.map(x => x.perf)), first = sl.findIndex(x => x.perf === top);
   sl.forEach((x, i) => x.alt = i !== first);
